@@ -170,7 +170,7 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
             if ((err = ffio_ensure_seekback(s->pb, 4)) < 0)
                 return err;
 
-            if ((err = avio_read(s->pb, header, 4)) < 0)
+            if ((err = avio_read(s->pb, header, 4)) < 4)
                 return avio_feof(s->pb) ? AVERROR_EOF : err;
 
             if (header[0] != HEADER_BYTE) {
