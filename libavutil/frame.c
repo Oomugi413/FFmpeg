@@ -31,8 +31,8 @@
 static const AVSideDataDescriptor sd_props[] = {
     [AV_FRAME_DATA_PANSCAN]                     = { "AVPanScan",                                    AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
     [AV_FRAME_DATA_A53_CC]                      = { "ATSC A53 Part 4 Closed Captions" },
-    [AV_FRAME_DATA_MATRIXENCODING]              = { "AVMatrixEncoding" },
-    [AV_FRAME_DATA_DOWNMIX_INFO]                = { "Metadata relevant to a downmix procedure" },
+    [AV_FRAME_DATA_MATRIXENCODING]              = { "AVMatrixEncoding",                             AV_SIDE_DATA_PROP_CHANNEL_DEPENDENT },
+    [AV_FRAME_DATA_DOWNMIX_INFO]                = { "Metadata relevant to a downmix procedure",     AV_SIDE_DATA_PROP_CHANNEL_DEPENDENT },
     [AV_FRAME_DATA_AFD]                         = { "Active format description" },
     [AV_FRAME_DATA_MOTION_VECTORS]              = { "Motion vectors",                               AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
     [AV_FRAME_DATA_SKIP_SAMPLES]                = { "Skip samples" },
@@ -730,7 +730,7 @@ int av_frame_copy_props(AVFrame *dst, const AVFrame *src)
 
 AVBufferRef *av_frame_get_plane_buffer(const AVFrame *frame, int plane)
 {
-    uint8_t *data;
+    uintptr_t data;
     int planes;
 
     if (frame->nb_samples) {
@@ -743,16 +743,20 @@ AVBufferRef *av_frame_get_plane_buffer(const AVFrame *frame, int plane)
 
     if (plane < 0 || plane >= planes || !frame->extended_data[plane])
         return NULL;
-    data = frame->extended_data[plane];
+    data = (uintptr_t)frame->extended_data[plane];
 
     for (int i = 0; i < FF_ARRAY_ELEMS(frame->buf) && frame->buf[i]; i++) {
         AVBufferRef *buf = frame->buf[i];
-        if (data >= buf->data && data < buf->data + buf->size)
+        uintptr_t buf_begin = (uintptr_t)buf->data;
+
+        if (data >= buf_begin && data < buf_begin + buf->size)
             return buf;
     }
     for (int i = 0; i < frame->nb_extended_buf; i++) {
         AVBufferRef *buf = frame->extended_buf[i];
-        if (data >= buf->data && data < buf->data + buf->size)
+        uintptr_t buf_begin = (uintptr_t)buf->data;
+
+        if (data >= buf_begin && data < buf_begin + buf->size)
             return buf;
     }
     return NULL;
@@ -1095,6 +1099,7 @@ int av_frame_apply_cropping(AVFrame *frame, int flags)
 {
     const AVPixFmtDescriptor *desc;
     size_t offsets[4];
+    int ret;
 
     if (!(frame->width > 0 && frame->height > 0))
         return AVERROR(EINVAL);
@@ -1122,7 +1127,9 @@ int av_frame_apply_cropping(AVFrame *frame, int flags)
     }
 
     /* calculate the offsets for each plane */
-    calc_cropping_offsets(offsets, frame, desc);
+    ret = calc_cropping_offsets(offsets, frame, desc);
+    if (ret < 0)
+        return ret;
 
     /* adjust the offsets to avoid breaking alignment */
     if (!(flags & AV_FRAME_CROP_UNALIGNED)) {
@@ -1141,7 +1148,9 @@ int av_frame_apply_cropping(AVFrame *frame, int flags)
 
         if (min_log2_align < 5 && log2_crop_align != INT_MAX) {
             frame->crop_left &= ~((1 << (5 + log2_crop_align - min_log2_align)) - 1);
-            calc_cropping_offsets(offsets, frame, desc);
+            ret = calc_cropping_offsets(offsets, frame, desc);
+            if (ret < 0)
+                return ret;
         }
     }
 
