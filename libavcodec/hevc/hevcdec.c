@@ -174,11 +174,8 @@ static int pred_weight_table(SliceHeader *sh, void *logctx,
 {
     int i = 0;
     int j = 0;
-    uint8_t luma_weight_l0_flag[16];
-    uint8_t chroma_weight_l0_flag[16];
-    uint8_t luma_weight_l1_flag[16];
-    uint8_t chroma_weight_l1_flag[16];
     int luma_log2_weight_denom;
+    unsigned luma_weight_flags, chroma_weight_flags;
 
     luma_log2_weight_denom = get_ue_golomb_long(gb);
     if (luma_log2_weight_denom < 0 || luma_log2_weight_denom > 7) {
@@ -195,29 +192,22 @@ static int pred_weight_table(SliceHeader *sh, void *logctx,
         sh->chroma_log2_weight_denom = chroma_log2_weight_denom;
     }
 
+    luma_weight_flags   = get_bits(gb, sh->nb_refs[L0]);
+    chroma_weight_flags = sps->chroma_format_idc != 0 ? get_bits(gb, sh->nb_refs[L0]) : 0;
     for (i = 0; i < sh->nb_refs[L0]; i++) {
-        luma_weight_l0_flag[i] = get_bits1(gb);
-        if (!luma_weight_l0_flag[i]) {
-            sh->luma_weight_l0[i] = 1 << sh->luma_log2_weight_denom;
-            sh->luma_offset_l0[i] = 0;
-        }
-    }
-    if (sps->chroma_format_idc != 0) {
-        for (i = 0; i < sh->nb_refs[L0]; i++)
-            chroma_weight_l0_flag[i] = get_bits1(gb);
-    } else {
-        for (i = 0; i < sh->nb_refs[L0]; i++)
-            chroma_weight_l0_flag[i] = 0;
-    }
-    for (i = 0; i < sh->nb_refs[L0]; i++) {
-        if (luma_weight_l0_flag[i]) {
+        unsigned flag_bit = 1 << (sh->nb_refs[L0] - 1 - i);
+
+        if (luma_weight_flags & flag_bit) {
             int delta_luma_weight_l0 = get_se_golomb(gb);
             if ((int8_t)delta_luma_weight_l0 != delta_luma_weight_l0)
                 return AVERROR_INVALIDDATA;
             sh->luma_weight_l0[i] = (1 << sh->luma_log2_weight_denom) + delta_luma_weight_l0;
             sh->luma_offset_l0[i] = get_se_golomb(gb);
+        } else {
+            sh->luma_weight_l0[i] = 1 << sh->luma_log2_weight_denom;
+            sh->luma_offset_l0[i] = 0;
         }
-        if (chroma_weight_l0_flag[i]) {
+        if (chroma_weight_flags & flag_bit) {
             for (j = 0; j < 2; j++) {
                 int delta_chroma_weight_l0 = get_se_golomb(gb);
                 int delta_chroma_offset_l0 = get_se_golomb(gb);
@@ -239,29 +229,22 @@ static int pred_weight_table(SliceHeader *sh, void *logctx,
         }
     }
     if (sh->slice_type == HEVC_SLICE_B) {
+        luma_weight_flags   = get_bits(gb, sh->nb_refs[L1]);
+        chroma_weight_flags = sps->chroma_format_idc != 0 ? get_bits(gb, sh->nb_refs[L1]) : 0;
         for (i = 0; i < sh->nb_refs[L1]; i++) {
-            luma_weight_l1_flag[i] = get_bits1(gb);
-            if (!luma_weight_l1_flag[i]) {
-                sh->luma_weight_l1[i] = 1 << sh->luma_log2_weight_denom;
-                sh->luma_offset_l1[i] = 0;
-            }
-        }
-        if (sps->chroma_format_idc != 0) {
-            for (i = 0; i < sh->nb_refs[L1]; i++)
-                chroma_weight_l1_flag[i] = get_bits1(gb);
-        } else {
-            for (i = 0; i < sh->nb_refs[L1]; i++)
-                chroma_weight_l1_flag[i] = 0;
-        }
-        for (i = 0; i < sh->nb_refs[L1]; i++) {
-            if (luma_weight_l1_flag[i]) {
+            unsigned flag_bit = 1 << (sh->nb_refs[L1] - 1 - i);
+
+            if (luma_weight_flags & flag_bit) {
                 int delta_luma_weight_l1 = get_se_golomb(gb);
                 if ((int8_t)delta_luma_weight_l1 != delta_luma_weight_l1)
                     return AVERROR_INVALIDDATA;
                 sh->luma_weight_l1[i] = (1 << sh->luma_log2_weight_denom) + delta_luma_weight_l1;
                 sh->luma_offset_l1[i] = get_se_golomb(gb);
+            } else {
+                sh->luma_weight_l1[i] = 1 << sh->luma_log2_weight_denom;
+                sh->luma_offset_l1[i] = 0;
             }
-            if (chroma_weight_l1_flag[i]) {
+            if (chroma_weight_flags & flag_bit) {
                 for (j = 0; j < 2; j++) {
                     int delta_chroma_weight_l1 = get_se_golomb(gb);
                     int delta_chroma_offset_l1 = get_se_golomb(gb);
@@ -2125,7 +2108,7 @@ static void hls_prediction_unit(HEVCLocalContext *lc,
     const RefPicList *refPicList = s->cur_frame->refPicList;
     const HEVCFrame *ref0 = NULL, *ref1 = NULL;
     const int *linesize = s->cur_frame->f->linesize;
-    uint8_t *dst0 = POS(0, x0, y0);
+    uint8_t *dst0 = s->cur_frame->f->data[0] + y0 * linesize[0] + (x0 << sps->pixel_shift);
     uint8_t *dst1 = POS(1, x0, y0);
     uint8_t *dst2 = POS(2, x0, y0);
     int log2_min_cb_size = sps->log2_min_cb_size;
@@ -3306,9 +3289,19 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
     s->first_nal_type    = s->nal_unit_type;
     s->poc               = s->sh.poc;
 
-    if (IS_IRAP(s))
+    if (IS_IRAP(s)) {
         s->no_rasl_output_flag = IS_IDR(s) || IS_BLA(s) ||
                                  (s->nal_unit_type == HEVC_NAL_CRA_NUT && s->last_eos);
+        s->recovery_poc = HEVC_RECOVERY_END;
+    }
+
+    if (s->recovery_poc != HEVC_RECOVERY_END &&
+        s->sei.recovery_point.has_recovery_poc) {
+        if (s->recovery_poc == HEVC_RECOVERY_UNSPECIFIED)
+            s->recovery_poc = s->poc + s->sei.recovery_point.recovery_poc_cnt;
+        else if (s->poc >= s->recovery_poc)
+            s->recovery_poc = HEVC_RECOVERY_END;
+    }
 
     /* 8.3.1 */
     if (s->temporal_id == 0 &&
@@ -3391,7 +3384,10 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
         goto fail;
 
     if (s->avctx->hwaccel) {
-        ret = FF_HW_CALL(s->avctx, start_frame, NULL, 0);
+        AVCodecInternal *avci = s->avctx->internal;
+        AVPacket *avpkt = avci->in_pkt;
+        ret = FF_HW_CALL(s->avctx, start_frame,
+                         avpkt->buf, NULL, 0);
         if (ret < 0)
             goto fail;
     }
@@ -3684,6 +3680,12 @@ fail:
     return ret;
 }
 
+static void decode_reset_recovery_point(HEVCContext *s)
+{
+    s->recovery_poc = HEVC_RECOVERY_UNSPECIFIED;
+    s->sei.recovery_point.has_recovery_poc = 0;
+}
+
 static int decode_nal_units(HEVCContext *s, const uint8_t *buf, int length)
 {
     int i, ret = 0;
@@ -3694,6 +3696,8 @@ static int decode_nal_units(HEVCContext *s, const uint8_t *buf, int length)
     s->last_eos = s->eos;
     s->eos = 0;
     s->slice_initialized = 0;
+    if (s->last_eos)
+        decode_reset_recovery_point(s);
 
     for (int i = 0; i < FF_ARRAY_ELEMS(s->layers); i++) {
         HEVCLayerContext *l = &s->layers[i];
@@ -3715,6 +3719,7 @@ static int decode_nal_units(HEVCContext *s, const uint8_t *buf, int length)
             s->pkt.nals[i].type == HEVC_NAL_EOS_NUT) {
             if (eos_at_start) {
                 s->last_eos = 1;
+                decode_reset_recovery_point(s);
             } else {
                 s->eos = 1;
             }
@@ -4087,6 +4092,8 @@ static int hevc_update_thread_context(AVCodecContext *dst,
     s->sei.common.display_orientation  = s0->sei.common.display_orientation;
     s->sei.common.alternative_transfer = s0->sei.common.alternative_transfer;
     s->sei.tdrdi                       = s0->sei.tdrdi;
+    s->sei.recovery_point              = s0->sei.recovery_point;
+    s->recovery_poc                    = s0->recovery_poc;
 
     return 0;
 }

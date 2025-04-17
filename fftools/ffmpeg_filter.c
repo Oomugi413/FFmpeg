@@ -60,7 +60,7 @@ typedef struct FilterGraphPriv {
 
     const char      *graph_desc;
 
-    char            *nb_threads;
+    int              nb_threads;
 
     // frame for temporarily holding output from the filtergraph
     AVFrame         *frame;
@@ -126,6 +126,8 @@ typedef struct InputFilterPriv {
 
     int                 eof;
     int                 bound;
+    int                 drop_warned;
+    uint64_t            nb_dropped;
 
     // parameters configured for this input
     int                 format;
@@ -160,7 +162,7 @@ typedef struct InputFilterPriv {
         int64_t last_pts;
         int64_t end_pts;
 
-        ///< marks if sub2video_update should force an initialization
+        /// marks if sub2video_update should force an initialization
         unsigned int initialize;
     } sub2video;
 } InputFilterPriv;
@@ -1042,7 +1044,6 @@ void fg_free(FilterGraph **pfg)
     }
     av_freep(&fg->outputs);
     av_freep(&fgp->graph_desc);
-    av_freep(&fgp->nb_threads);
 
     av_frame_free(&fgp->frame);
     av_frame_free(&fgp->frame_enc);
@@ -1097,6 +1098,7 @@ int fg_create(FilterGraph **pfg, char *graph_desc, Scheduler *sch)
     fg->class       = &fg_class;
     fgp->graph_desc = graph_desc;
     fgp->disable_conversions = !auto_conversion_filters;
+    fgp->nb_threads          = -1;
     fgp->sch                 = sch;
 
     snprintf(fgp->log_name, sizeof(fgp->log_name), "fc#%d", fg->index);
@@ -1247,12 +1249,8 @@ int fg_create_simple(FilterGraph **pfg,
     if (ret < 0)
         return ret;
 
-    if (opts->nb_threads) {
-        av_freep(&fgp->nb_threads);
-        fgp->nb_threads = av_strdup(opts->nb_threads);
-        if (!fgp->nb_threads)
-            return AVERROR(ENOMEM);
-    }
+    if (opts->nb_threads >= 0)
+        fgp->nb_threads = opts->nb_threads;
 
     return 0;
 }
@@ -1936,8 +1934,8 @@ static int configure_filtergraph(FilterGraph *fg, FilterGraphThread *fgt)
             ret = av_opt_set(fgt->graph, "threads", filter_nbthreads, 0);
             if (ret < 0)
                 goto fail;
-        } else if (fgp->nb_threads) {
-            ret = av_opt_set(fgt->graph, "threads", fgp->nb_threads, 0);
+        } else if (fgp->nb_threads >= 0) {
+            ret = av_opt_set_int(fgt->graph, "threads", fgp->nb_threads, 0);
             if (ret < 0)
                 return ret;
         }
@@ -2045,6 +2043,10 @@ static int configure_filtergraph(FilterGraph *fg, FilterGraphThread *fgt)
             if (ifp->type_src == AVMEDIA_TYPE_SUBTITLE) {
                 sub2video_frame(&ifp->ifilter, tmp, !fgt->graph);
             } else {
+                if (ifp->type_src == AVMEDIA_TYPE_VIDEO) {
+                    if (ifp->displaymatrix_applied)
+                        av_frame_remove_side_data(tmp, AV_FRAME_DATA_DISPLAYMATRIX);
+                }
                 ret = av_buffersrc_add_frame(ifp->filter, tmp);
             }
             av_frame_free(&tmp);
@@ -2898,6 +2900,13 @@ static int send_frame(FilterGraph *fg, FilterGraphThread *fgt,
     } else if (ifp->downmixinfo_present)
         need_reinit |= DOWNMIX_CHANGED;
 
+    if (need_reinit && fgt->graph && (ifp->opts.flags & IFILTER_FLAG_DROPCHANGED)) {
+            ifp->nb_dropped++;
+            av_log_once(fg, AV_LOG_WARNING, AV_LOG_DEBUG, &ifp->drop_warned, "Avoiding reinit; dropping frame pts: %s bound for %s\n", av_ts2str(frame->pts), ifilter->name);
+            av_frame_unref(frame);
+            return 0;
+    }
+
     if (!(ifp->opts.flags & IFILTER_FLAG_REINIT) && fgt->graph)
         need_reinit = 0;
 
@@ -3078,7 +3087,7 @@ static int filter_thread(void *arg)
 
     while (1) {
         InputFilter *ifilter;
-        InputFilterPriv *ifp;
+        InputFilterPriv *ifp = NULL;
         enum FrameOpaque o;
         unsigned input_idx = fgt.next_in;
 
@@ -3140,6 +3149,8 @@ read_frames:
         ret = read_frames(fg, &fgt, fgt.frame);
         if (ret == AVERROR_EOF) {
             av_log(fg, AV_LOG_VERBOSE, "All consumers returned EOF\n");
+            if (ifp && ifp->opts.flags & IFILTER_FLAG_DROPCHANGED)
+                av_log(fg, AV_LOG_INFO, "Total changed input frames dropped : %"PRId64"\n", ifp->nb_dropped);
             break;
         } else if (ret < 0) {
             av_log(fg, AV_LOG_ERROR, "Error sending frames to consumers: %s\n",
