@@ -414,6 +414,11 @@ static av_cold int init_audio(AVFilterContext *ctx)
         av_channel_layout_describe(&s->ch_layout, buf, sizeof(buf));
     }
 
+    if (s->sample_rate <= 0) {
+        av_log(ctx, AV_LOG_ERROR, "Sample rate not set\n");
+        return AVERROR(EINVAL);
+    }
+
     if (!s->time_base.num)
         s->time_base = (AVRational){1, s->sample_rate};
 
@@ -461,12 +466,17 @@ static int query_formats(AVFilterContext *ctx)
             if ((ret = ff_add_format(&color_spaces, c->color_space)) < 0 ||
                 (ret = ff_set_common_color_spaces(ctx, color_spaces)) < 0)
                 return ret;
-            if ((ret = ff_add_format(&color_ranges, c->color_range)) < 0)
-                return ret;
-            if (c->color_range == AVCOL_RANGE_UNSPECIFIED) {
-                /* allow implicitly promoting unspecified to mpeg */
-                if ((ret = ff_add_format(&color_ranges, AVCOL_RANGE_MPEG)) < 0)
+            if (ff_fmt_is_forced_full_range(swfmt)) {
+                if ((ret = ff_add_format(&color_ranges, AVCOL_RANGE_JPEG)) < 0)
                     return ret;
+            } else {
+                if ((ret = ff_add_format(&color_ranges, c->color_range)) < 0)
+                    return ret;
+                if (c->color_range == AVCOL_RANGE_UNSPECIFIED) {
+                    /* allow implicitly promoting unspecified to mpeg */
+                    if ((ret = ff_add_format(&color_ranges, AVCOL_RANGE_MPEG)) < 0)
+                        return ret;
+                }
             }
             if ((ret = ff_set_common_color_ranges(ctx, color_ranges)) < 0)
                 return ret;

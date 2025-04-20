@@ -212,6 +212,8 @@ typedef struct MOVStreamContext {
     unsigned drefs_count;
     MOVDref *drefs;
     int dref_id;
+    unsigned tref_flags;
+    int tref_id;
     int timecode_track;
     int width;            ///< tkhd width
     int height;           ///< tkhd height
@@ -353,7 +355,7 @@ typedef struct MOVContext {
     uint32_t max_stts_delta;
     int primary_item_id;
     int cur_item_id;
-    HEIFItem *heif_item;
+    HEIFItem **heif_item;
     int nb_heif_item;
     HEIFGrid *heif_grid;
     int nb_heif_grid;
@@ -408,6 +410,7 @@ void ff_mp4_parse_es_descr(AVIOContext *pb, int *es_id);
 #define MOV_SAMPLE_DEPENDENCY_YES     0x1
 #define MOV_SAMPLE_DEPENDENCY_NO      0x2
 
+#define MOV_TREF_FLAG_ENHANCEMENT     0x1
 
 #define TAG_IS_AVCI(tag)                    \
     ((tag) == MKTAG('a', 'i', '5', 'p') ||  \
